@@ -19,13 +19,13 @@ data class KafkaRuntime(val port: Int)
 data class SchemaRuntime(val port: Int)
 
 sealed class Event
-object StartZookeeker: Event()
-object StopZookeeker: Event()
-object StartKafka: Event()
-data class StackStarted(val config: StackConfig): Event()
-object StopKafka: Event()
-object StartSchema: Event()
-object StopSchema: Event()
+object StartZookeeker : Event()
+object StopZookeeker : Event()
+object StartKafka : Event()
+data class StackStarted(val config: StackConfig) : Event()
+object StopKafka : Event()
+object StartSchema : Event()
+object StopSchema : Event()
 
 fun startZk(): Resource<ZkRuntime> = resource {
     printIo("Start ZooKeeper")
@@ -66,20 +66,23 @@ fun startSchemaRegistryStep(): Step<SchemaRuntime> = Step(
     stoppingEvent = StopSchema
 )
 
-class ForStep { private constructor()}
+class ForStep {
+    private constructor()
+}
 typealias StepOf<A> = Kind<ForStep, A>
+
 fun <A> StepOf<A>.fix(): Step<A> = this as Step<A>
 
-data class Step<out A> (
+data class Step<out A>(
     val run: Resource<A>,
     val startedEvent: Event,
     val stoppingEvent: Event
-): StepOf<A>  {
+) : StepOf<A> {
     companion object {
-        fun functor(): Functor<ForStep> = object: Functor<ForStep> {
+        fun functor(): Functor<ForStep> = object : Functor<ForStep> {
             override fun <A, B> Kind<ForStep, A>.map(f: (A) -> B): Kind<ForStep, B> = with(fix()) {
                 Step(
-                    run =  run.map(f),
+                    run = run.map(f),
                     startedEvent,
                     stoppingEvent
                 )
@@ -93,8 +96,10 @@ typealias StackConfig = Triple<ZkRuntime, KafkaRuntime, SchemaRuntime>
 
 suspend fun runList(program: FreeOf<ForStep, StackConfig>, interrupt: Channel<Boolean>): List<Event> {
     suspend fun FreeOf<ForStep, StackConfig>.fold(): List<Event> =
-        when(val f = this.fix()) {
-            is Pure -> { interrupt.receive(); listOf(StackStarted(f.value)) }
+        when (val f = this.fix()) {
+            is Pure -> {
+                interrupt.receive(); listOf(StackStarted(f.value))
+            }
             is Suspend -> f.next.fix().run {
                 listOf(startedEvent) + run.use { it.fold() } + listOf(stoppingEvent)
             }
@@ -113,13 +118,15 @@ fun <T> Resource<T>.asFlow(): Flow<T> = let { resource ->
 
 suspend fun runStream(program: FreeOf<ForStep, StackConfig>, interrupt: Channel<Boolean>): Flow<Event> {
     suspend fun FreeOf<ForStep, StackConfig>.fold(): Flow<Event> =
-        when(val f = this.fix()) {
+        when (val f = this.fix()) {
             is Pure -> flow { emit(StackStarted(f.value)); interrupt.receive() }
-            is Suspend -> f.next.fix().run { flow {
-                emit(startedEvent)
-                emitAll(run.asFlow().flatMapConcat { it.fold() })
-                emit(stoppingEvent)
-            }}
+            is Suspend -> f.next.fix().run {
+                flow {
+                    emit(startedEvent)
+                    emitAll(run.asFlow().flatMapConcat { it.fold() })
+                    emit(stoppingEvent)
+                }
+            }
         }
 
     return program.fold()
@@ -137,37 +144,35 @@ fun main() = runBlocking {
     }
 
     println("=============== Free =================")
-    with(Step.functor(), Log) {
-        with(freeMonad()) {
-            val t = startZkStep().liftF()
-                .flatMap { zkRuntime ->
-                    startKafkaStep().liftF()
-                        .flatMap { kafkaRuntime ->
-                            startSchemaRegistryStep()
-                                .map { schemaRuntime ->
-                                    Triple(zkRuntime, kafkaRuntime, schemaRuntime).also(::println)
-                                }
-                                .liftF()
-                        }
-                }
-            println(t)
-            println("----- List -----")
-            var listInterruptChannel = Channel<Boolean>()
-            launch {
-                delay(5.seconds)
-                listInterruptChannel.send(true)
+    with2(Step.functor(), ::freeMonad) {
+        val t = startZkStep().liftF()
+            .flatMap { zkRuntime ->
+                startKafkaStep().liftF()
+                    .flatMap { kafkaRuntime ->
+                        startSchemaRegistryStep()
+                            .map { schemaRuntime ->
+                                Triple(zkRuntime, kafkaRuntime, schemaRuntime).also(::println)
+                            }
+                            .liftF()
+                    }
             }
-            runList(t, listInterruptChannel)
-                .forEach(printEvent)
-            println("----- Stream -----")
-            var streamInterruptChannel = Channel<Boolean>()
-            launch {
-                delay(5.seconds)
-                streamInterruptChannel.send(true)
-            }
-            runStream(t, streamInterruptChannel)
-                .collect(printEvent)
+        println(t)
+        println("----- List -----")
+        var listInterruptChannel = Channel<Boolean>()
+        launch {
+            delay(5.seconds)
+            listInterruptChannel.send(true)
         }
+        runList(t, listInterruptChannel)
+            .forEach(printEvent)
+        println("----- Stream -----")
+        var streamInterruptChannel = Channel<Boolean>()
+        launch {
+            delay(5.seconds)
+            streamInterruptChannel.send(true)
+        }
+        runStream(t, streamInterruptChannel)
+            .collect(printEvent)
     }
 }
 
@@ -175,21 +180,30 @@ val printEvent = { v: Any? -> println("[Event] $v") }
 val printIo = { v: Any? -> println("[IO] $v") }
 
 @OptIn(ExperimentalContracts::class)
-inline fun <A, B, R> with(a: A, b: B, block: context(A, B) (TypeWrapper<B>) -> R): R {
+inline fun <A, B, R> with(a: A, b: B, block: context(A, B) (TypeWrapper2<A, B>) -> R): R {
     contract {
         callsInPlace(block, InvocationKind.EXACTLY_ONCE)
     }
-    return block(a, b, TypeWrapper.IMPL)
+    return block(a, b, TypeWrapper2.IMPL)
+}
+
+@OptIn(ExperimentalContracts::class)
+inline fun <A, B, R> with2(a: A, b: context(A) () -> B, block: context(A, B) (TypeWrapper2<A, B>) -> R): R {
+    contract {
+        callsInPlace(block, InvocationKind.EXACTLY_ONCE)
+    }
+    return block(a, b(a), TypeWrapper2.IMPL)
 }
 
 
 interface Log {
     fun info(message: Any?)
+
     companion object Default : Log {
         override fun info(message: Any?) = println(message)
     }
 }
 
-sealed interface TypeWrapper<out A> {
-    object IMPL: TypeWrapper<Nothing>
+sealed interface TypeWrapper2<out A, out B> {
+    object IMPL : TypeWrapper2<Nothing, Nothing>
 }
