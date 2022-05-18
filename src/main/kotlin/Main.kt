@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.flatMapConcat
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlin.contracts.ExperimentalContracts
+import kotlin.contracts.InvocationKind
+import kotlin.contracts.contract
 import kotlin.time.Duration.Companion.seconds
 
 data class ZkRuntime(val port: Int)
@@ -134,7 +137,7 @@ fun main() = runBlocking {
     }
 
     println("=============== Free =================")
-    with(Step.functor()) {
+    with(Step.functor(), Log) {
         with(freeMonad()) {
             val t = startZkStep().liftF()
                 .flatMap { zkRuntime ->
@@ -170,3 +173,23 @@ fun main() = runBlocking {
 
 val printEvent = { v: Any? -> println("[Event] $v") }
 val printIo = { v: Any? -> println("[IO] $v") }
+
+@OptIn(ExperimentalContracts::class)
+inline fun <A, B, R> with(a: A, b: B, block: context(A, B) (TypeWrapper<B>) -> R): R {
+    contract {
+        callsInPlace(block, InvocationKind.EXACTLY_ONCE)
+    }
+    return block(a, b, TypeWrapper.IMPL)
+}
+
+
+interface Log {
+    fun info(message: Any?)
+    companion object Default : Log {
+        override fun info(message: Any?) = println(message)
+    }
+}
+
+sealed interface TypeWrapper<out A> {
+    object IMPL: TypeWrapper<Nothing>
+}
